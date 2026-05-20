@@ -87,8 +87,15 @@ function resolveRef(doc: OpenApiDocument, ref: string): OpenApiSchema {
   return current as OpenApiSchema;
 }
 
+function sanitizeTypeName(name: string): string {
+  return name
+    .replace(/[^a-zA-Z0-9_]/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_|_$/g, "");
+}
+
 function extractRefName(ref: string): string {
-  return ref.split("/").pop()!;
+  return sanitizeTypeName(ref.split("/").pop()!);
 }
 
 function resolveSchema(doc: OpenApiDocument, schema: OpenApiSchema): OpenApiSchema {
@@ -214,17 +221,14 @@ function parseAuth(doc: OpenApiDocument): AuthScheme[] {
 
 function parseModels(
   doc: OpenApiDocument,
-): Map<string, ObjectType | EnumType> {
-  const models = new Map<string, ObjectType | EnumType>();
+): Map<string, TypeRef & { name: string }> {
+  const models = new Map<string, TypeRef & { name: string }>();
   const schemas = doc.components?.schemas ?? {};
 
-  for (const [name, schema] of Object.entries(schemas)) {
+  for (const [rawName, schema] of Object.entries(schemas)) {
+    const name = sanitizeTypeName(rawName);
     const typeRef = parseTypeRef(doc, schema);
-    if (typeRef.kind === "object") {
-      models.set(name, { ...typeRef, name });
-    } else if (typeRef.kind === "enum") {
-      models.set(name, { ...typeRef, name });
-    }
+    models.set(name, { ...typeRef, name } as TypeRef & { name: string });
   }
 
   return models;
@@ -272,6 +276,16 @@ function inferPagination(
   return undefined;
 }
 
+function slugify(name: string): string {
+  return name
+    .replace(/([a-z])([A-Z])/g, "$1-$2")
+    .replace(/[\s_]+/g, "-")
+    .replace(/[^a-zA-Z0-9-]/g, "")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .toLowerCase();
+}
+
 const HTTP_METHODS = ["get", "post", "put", "patch", "delete"] as const;
 
 function parseOperations(doc: OpenApiDocument): Operation[] {
@@ -285,7 +299,8 @@ function parseOperations(doc: OpenApiDocument): Operation[] {
       const parameters: Parameter[] = (op.parameters ?? [])
         .filter((p) => p.in !== "cookie")
         .map((p) => ({
-          name: p.name,
+          name: p.name.replace(/[^a-zA-Z0-9_]/g, ""),
+          wireName: p.name,
           location: p.in as "path" | "query" | "header",
           type: parseTypeRef(doc, p.schema),
           required: p.required ?? false,
@@ -327,8 +342,9 @@ function parseOperations(doc: OpenApiDocument): Operation[] {
 
       const id =
         op.operationId ?? `${method}_${path.replace(/[^a-zA-Z0-9]/g, "_")}`;
-      const groupName =
+      const rawGroup =
         op.tags?.[0] ?? path.split("/").filter(Boolean)[0] ?? "default";
+      const groupName = slugify(rawGroup);
 
       operations.push({
         id,

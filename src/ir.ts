@@ -62,6 +62,7 @@ type TypeRef =
 
 interface Parameter {
   name: string;
+  wireName: string;
   location: "path" | "query" | "header";
   type: TypeRef;
   required: boolean;
@@ -123,7 +124,7 @@ interface ApiSpec {
   baseUrl: string;
   description?: string;
   auth: AuthScheme[];
-  models: Map<string, ObjectType | EnumType>;
+  models: Map<string, TypeRef & { name: string }>;
   groups: ServiceGroup[];
 }
 
