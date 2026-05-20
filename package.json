@@ -1,0 +1,29 @@
+{
+  "name": "ingot",
+  "version": "0.1.0",
+  "description": "Generate production-ready, typed SDKs from OpenAPI specifications.",
+  "type": "module",
+  "bin": {
+    "ingot": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "tsc --noEmit"
+  },
+  "keywords": ["openapi", "sdk", "generator", "typescript", "python", "cli"],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "yaml": "^2.7.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.3"
+  }
+}
