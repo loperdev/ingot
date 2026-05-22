@@ -118,6 +118,31 @@ function resolveSchema(doc: OpenApiDocument, schema: OpenApiSchema): OpenApiSche
   return schema;
 }
 
+function flattenAllOf(doc: OpenApiDocument, schemas: OpenApiSchema[], target: OpenApiSchema): void {
+  for (const sub of schemas) {
+    const resolved = resolveSchema(doc, sub);
+    if (resolved.allOf) {
+      flattenAllOf(doc, resolved.allOf, target);
+      if (resolved.properties) {
+        Object.assign(target.properties!, resolved.properties);
+      }
+      if (resolved.required) {
+        target.required!.push(...resolved.required);
+      }
+    } else {
+      if (resolved.properties) {
+        Object.assign(target.properties!, resolved.properties);
+      }
+      if (resolved.required) {
+        target.required!.push(...resolved.required);
+      }
+      if (resolved.description && !target.description) {
+        target.description = resolved.description;
+      }
+    }
+  }
+}
+
 function parseTypeRef(doc: OpenApiDocument, schema: OpenApiSchema): TypeRef {
   if (!schema) {
     return { kind: "primitive", type: "string" };
@@ -135,17 +160,9 @@ function parseTypeRef(doc: OpenApiDocument, schema: OpenApiSchema): TypeRef {
   }
 
   if (schema.allOf) {
-    // Merge allOf into a single object type
     const merged: OpenApiSchema = { type: "object", properties: {}, required: [] };
-    for (const sub of schema.allOf) {
-      const resolved = resolveSchema(doc, sub);
-      if (resolved.properties) {
-        Object.assign(merged.properties!, resolved.properties);
-      }
-      if (resolved.required) {
-        merged.required!.push(...resolved.required);
-      }
-    }
+    if (schema.description) merged.description = schema.description;
+    flattenAllOf(doc, schema.allOf, merged);
     return parseTypeRef(doc, merged);
   }
 

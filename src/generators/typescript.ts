@@ -36,8 +36,10 @@ function typeRefToTs(ref: TypeRef): string {
       return `${typeRefToTs(ref.items)}[]`;
     case "enum":
       return ref.values.map((v) => (typeof v === "string" ? `"${v}"` : v)).join(" | ");
-    case "union":
-      return ref.variants.map(typeRefToTs).join(" | ");
+    case "union": {
+      const mapped = ref.variants.map(typeRefToTs).filter(Boolean);
+      return mapped.length > 0 ? mapped.join(" | ") : "unknown";
+    }
     case "object":
       if (ref.name) return ref.name;
       return inlineObjectType(ref);
@@ -102,7 +104,7 @@ function generateEnumType(model: EnumType): string {
   if (model.description) {
     lines.push(`/** ${model.description} */`);
   }
-  lines.push(`export type ${model.name} = ${values};`);
+  lines.push(`export type ${model.name} = ${values || "string"};`);
   return lines.join("\n");
 }
 
@@ -116,8 +118,8 @@ function generateModels(spec: ApiSpec): string {
       parts.push(generateEnumType(model as EnumType));
     } else {
       const resolved = typeRefToTs(model);
-      if (resolved === model.name) {
-        parts.push(`export type ${model.name} = string;`);
+      if (!resolved || resolved === model.name || resolved.includes(model.name)) {
+        parts.push(`export type ${model.name} = unknown;`);
       } else {
         parts.push(`export type ${model.name} = ${resolved};`);
       }
@@ -217,6 +219,29 @@ function generateMethodName(op: Operation): string {
   return op.id.replace(/[^a-zA-Z0-9]/g, " ").replace(/\s+(.)/g, (_, c) => c.toUpperCase()).replace(/\s/g, "");
 }
 
+function buildMethodJsDoc(op: Operation): string | null {
+  const hasDescription = !!op.description;
+  const paramsWithDesc = op.parameters.filter((p) => p.description);
+  if (!hasDescription && paramsWithDesc.length === 0) return null;
+
+  const docLines: string[] = ["  /**"];
+  if (op.description) {
+    const safe = op.description.replace(/\*\//g, "* /");
+    for (const line of safe.split("\n")) {
+      docLines.push(`   * ${line.trimEnd()}`);
+    }
+  }
+  if (hasDescription && paramsWithDesc.length > 0) {
+    docLines.push("   *");
+  }
+  for (const p of paramsWithDesc) {
+    const desc = p.description!.replace(/\*\//g, "* /").split("\n")[0];
+    docLines.push(`   * @param ${p.name} - ${desc}`);
+  }
+  docLines.push("   */");
+  return docLines.join("\n");
+}
+
 function generateServiceGroup(group: ServiceGroup): { code: string; needsPagination: boolean } {
   let needsPagination = false;
 
@@ -229,8 +254,9 @@ function generateServiceGroup(group: ServiceGroup): { code: string; needsPaginat
     const itemType = paginatedItemType(op);
 
     const lines: string[] = [];
-    if (op.description) {
-      lines.push(formatJsDoc(op.description, "  "));
+    const docParts = buildMethodJsDoc(op);
+    if (docParts) {
+      lines.push(docParts);
     }
 
     if (itemType && op.pagination) {
@@ -379,8 +405,19 @@ function generatePackageJson(spec: ApiSpec): string {
       type: "module",
       main: "./dist/index.js",
       types: "./dist/index.d.ts",
+      exports: {
+        ".": {
+          types: "./dist/index.d.ts",
+          import: "./dist/index.js",
+        },
+      },
+      files: ["dist", "README.md"],
       scripts: {
         build: "tsc",
+        prepublishOnly: "npm run build",
+      },
+      engines: {
+        node: ">=18",
       },
       dependencies: {},
       devDependencies: {
@@ -390,6 +427,150 @@ function generatePackageJson(spec: ApiSpec): string {
     null,
     2,
   );
+}
+
+function generateReadme(spec: ApiSpec): string {
+  const pkgName = spec.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  const lines: string[] = [];
+
+  lines.push(`# ${spec.name} TypeScript SDK`);
+  lines.push("");
+  if (spec.description) {
+    lines.push(spec.description);
+    lines.push("");
+  }
+  lines.push("## Installation");
+  lines.push("");
+  lines.push("```sh");
+  lines.push(`npm install ${pkgName}`);
+  lines.push("```");
+  lines.push("");
+
+  lines.push("## Usage");
+  lines.push("");
+
+  const hasApiKey = spec.auth.some((a) => a.strategy === "bearer" || a.strategy === "apiKey");
+  const hasBasic = spec.auth.some((a) => a.strategy === "basic");
+
+  lines.push("```typescript");
+  lines.push(`import { IngotClient } from "${pkgName}";`);
+  lines.push("");
+
+  if (hasApiKey) {
+    lines.push(`const client = new IngotClient({`);
+    lines.push(`  apiKey: process.env.API_KEY,`);
+    lines.push(`});`);
+  } else if (hasBasic) {
+    lines.push(`const client = new IngotClient({`);
+    lines.push(`  username: process.env.USERNAME,`);
+    lines.push(`  password: process.env.PASSWORD,`);
+    lines.push(`});`);
+  } else {
+    lines.push(`const client = new IngotClient();`);
+  }
+  lines.push("");
+
+  const exampleGroup = spec.groups[0];
+  if (exampleGroup) {
+    const fieldName = toCamelCase(exampleGroup.name);
+    const getOp = exampleGroup.operations.find((op) => op.method === "get" && op.parameters.filter((p) => p.location === "path").length === 0);
+    const listOp = exampleGroup.operations.find((op) => op.method === "get" && op.parameters.some((p) => p.location === "query"));
+    const target = listOp ?? getOp;
+
+    if (target) {
+      const methodName = generateMethodName(target);
+      const hasPagination = !!paginatedItemType(target);
+      if (hasPagination) {
+        lines.push(`for await (const item of client.${fieldName}.${methodName}({})) {`);
+        lines.push(`  console.log(item);`);
+        lines.push(`}`);
+      } else {
+        lines.push(`const result = await client.${fieldName}.${methodName}();`);
+        lines.push(`console.log(result);`);
+      }
+    }
+  }
+  lines.push("```");
+  lines.push("");
+
+  lines.push("## Configuration");
+  lines.push("");
+  lines.push("| Option | Type | Default | Description |");
+  lines.push("|--------|------|---------|-------------|");
+  if (hasApiKey) {
+    lines.push("| `apiKey` | `string` | — | API key for authentication |");
+  }
+  if (hasBasic) {
+    lines.push("| `username` | `string` | — | Username for basic auth |");
+    lines.push("| `password` | `string` | — | Password for basic auth |");
+  }
+  lines.push(`| \`baseUrl\` | \`string\` | \`${spec.baseUrl}\` | API base URL |`);
+  lines.push("| `timeout` | `number` | `30000` | Request timeout in ms |");
+  lines.push("| `maxRetries` | `number` | `2` | Max retry attempts |");
+  lines.push("");
+
+  lines.push("## Per-Request Options");
+  lines.push("");
+  lines.push("Every method accepts an optional `RequestConfig` as the last argument:");
+  lines.push("");
+  lines.push("```typescript");
+  if (exampleGroup) {
+    const fieldName = toCamelCase(exampleGroup.name);
+    const postOp = exampleGroup.operations.find((op) => op.method === "post");
+    if (postOp) {
+      const methodName = generateMethodName(postOp);
+      lines.push(`await client.${fieldName}.${methodName}(body, {`);
+    } else {
+      lines.push(`await client.someResource.someMethod(params, {`);
+    }
+  } else {
+    lines.push(`await client.someResource.someMethod(params, {`);
+  }
+  lines.push(`  timeout: 5000,`);
+  lines.push(`  maxRetries: 0,`);
+  lines.push(`  headers: { "X-Custom": "value" },`);
+  lines.push(`});`);
+  lines.push("```");
+  lines.push("");
+
+  lines.push("## Resources");
+  lines.push("");
+  for (const group of spec.groups) {
+    const fieldName = toCamelCase(group.name);
+    lines.push(`- \`client.${fieldName}\``);
+    for (const op of group.operations) {
+      const methodName = generateMethodName(op);
+      const desc = op.description ? ` — ${op.description.split("\n")[0]}` : "";
+      lines.push(`  - \`.${methodName}()\`${desc}`);
+    }
+  }
+  lines.push("");
+
+  lines.push("## Error Handling");
+  lines.push("");
+  lines.push("```typescript");
+  lines.push(`import { APIError, RateLimitError, TimeoutError } from "${pkgName}";`);
+  lines.push("");
+  lines.push("try {");
+  lines.push(`  await client.${toCamelCase(spec.groups[0]?.name ?? "resource")}.someMethod();`);
+  lines.push("} catch (err) {");
+  lines.push("  if (err instanceof RateLimitError) {");
+  lines.push(`    console.log("Rate limited, retry after:", err.headers.get("retry-after"));`);
+  lines.push("  } else if (err instanceof TimeoutError) {");
+  lines.push("    console.log(\"Request timed out\");");
+  lines.push("  } else if (err instanceof APIError) {");
+  lines.push("    console.log(err.status, err.body);");
+  lines.push("  }");
+  lines.push("}");
+  lines.push("```");
+  lines.push("");
+
+  lines.push("---");
+  lines.push("");
+  lines.push("Generated by [Ingot](https://github.com/loperdev/ingot).");
+  lines.push("");
+
+  return lines.join("\n");
 }
 
 function generateTsConfig(): string {
@@ -473,6 +654,7 @@ async function generateTypescriptSdk(
   await copyRuntime(srcDir);
   await writeFile(join(outputDir, "package.json"), generatePackageJson(spec));
   await writeFile(join(outputDir, "tsconfig.json"), generateTsConfig());
+  await writeFile(join(outputDir, "README.md"), generateReadme(spec));
   await writeFile(join(srcDir, "models.ts"), generateModels(spec));
 
   const clientParts: string[] = [
