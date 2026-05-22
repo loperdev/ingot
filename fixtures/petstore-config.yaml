@@ -1,0 +1,11 @@
+name: "PetStore SDK"
+package: "@acme/petstore"
+resources:
+  pets:
+    methods:
+      listPets: list
+      createPet: create
+      getPet: get
+      deletePet: delete
+  owners:
+    rename: pet-owners

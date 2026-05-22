@@ -56,9 +56,23 @@ describe("TypeScript generator", () => {
     expect(content).toContain("Pet");
   });
 
-  it("includes retry logic in client", async () => {
+  it("uses vendored runtime with retry logic", async () => {
     const content = await readFile(resolve(OUTPUT_DIR, "src/client.ts"), "utf-8");
-    expect(content).toContain("maxRetries");
-    expect(content).toContain("attempt");
+    expect(content).toContain("extends BaseClient");
+    expect(content).toContain("import { BaseClient }");
+    const runtime = await readFile(resolve(OUTPUT_DIR, "src/_runtime/client.ts"), "utf-8");
+    expect(runtime).toContain("maxRetries");
+    expect(runtime).toContain("shouldRetry");
+    expect(runtime).toContain("retryDelay");
+  });
+
+  it("exports typed error classes", async () => {
+    const content = await readFile(resolve(OUTPUT_DIR, "src/index.ts"), "utf-8");
+    expect(content).toContain("APIError");
+    expect(content).toContain("RateLimitError");
+    expect(content).toContain("AuthenticationError");
+    const errors = await readFile(resolve(OUTPUT_DIR, "src/_runtime/error.ts"), "utf-8");
+    expect(errors).toContain("class RateLimitError extends APIError");
+    expect(errors).toContain("class TimeoutError");
   });
 });

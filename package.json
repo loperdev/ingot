@@ -7,7 +7,7 @@
     "ingot": "./dist/cli.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && cp src/runtime/typescript/*.ts dist/runtime/typescript/",
     "dev": "tsc --watch",
     "test": "vitest run",
     "test:watch": "vitest",

@@ -20,7 +20,7 @@ interface OpenApiDocument {
   openapi: string;
   info: { title: string; version: string; description?: string };
   servers?: Array<{ url: string }>;
-  paths: Record<string, Record<string, OpenApiOperation>>;
+  paths: Record<string, Record<string, OpenApiOperation> & { parameters?: OpenApiParameter[] }>;
   components?: {
     schemas?: Record<string, OpenApiSchema>;
     securitySchemes?: Record<string, OpenApiSecurityScheme>;
@@ -87,11 +87,24 @@ function resolveRef(doc: OpenApiDocument, ref: string): OpenApiSchema {
   return current as OpenApiSchema;
 }
 
+const RESERVED_WORDS = new Set([
+  "break", "case", "catch", "class", "const", "continue", "debugger",
+  "default", "delete", "do", "else", "enum", "export", "extends", "false",
+  "finally", "for", "function", "if", "import", "in", "instanceof", "new",
+  "null", "return", "super", "switch", "this", "throw", "true", "try",
+  "typeof", "undefined", "var", "void", "while", "with", "yield",
+  "implements", "interface", "package", "private", "protected", "public", "static",
+]);
+
 function sanitizeTypeName(name: string): string {
-  return name
+  let result = name
     .replace(/[^a-zA-Z0-9_]/g, "_")
     .replace(/_+/g, "_")
     .replace(/^_|_$/g, "");
+  if (RESERVED_WORDS.has(result.toLowerCase())) {
+    result = result.charAt(0).toUpperCase() + result.slice(1) + "_";
+  }
+  return result;
 }
 
 function extractRefName(ref: string): string {
@@ -106,6 +119,10 @@ function resolveSchema(doc: OpenApiDocument, schema: OpenApiSchema): OpenApiSche
 }
 
 function parseTypeRef(doc: OpenApiDocument, schema: OpenApiSchema): TypeRef {
+  if (!schema) {
+    return { kind: "primitive", type: "string" };
+  }
+
   if (schema.$ref) {
     return { kind: "ref", name: extractRefName(schema.$ref) };
   }
@@ -133,10 +150,14 @@ function parseTypeRef(doc: OpenApiDocument, schema: OpenApiSchema): TypeRef {
   }
 
   if (schema.enum) {
+    const values = schema.enum.filter((v: unknown) => v !== "" && v !== null && v !== undefined);
+    if (values.length === 0) {
+      return { kind: "primitive", type: "string" };
+    }
     return {
       kind: "enum",
       name: "",
-      values: schema.enum,
+      values,
       description: schema.description,
     };
   }
@@ -296,22 +317,63 @@ function parseOperations(doc: OpenApiDocument): Operation[] {
       const op = methods[method] as OpenApiOperation | undefined;
       if (!op) continue;
 
-      const parameters: Parameter[] = (op.parameters ?? [])
+      const pathLevelParams = (methods.parameters ?? []) as OpenApiParameter[];
+      const opLevelParams = op.parameters ?? [];
+      const opParamNames = new Set(opLevelParams.map((p) => (p as unknown as { $ref?: string }).$ref ?? `${(p as OpenApiParameter).in}:${(p as OpenApiParameter).name}`));
+      const mergedRawParams = [
+        ...opLevelParams,
+        ...pathLevelParams.filter((p) => {
+          const key = (p as unknown as { $ref?: string }).$ref ?? `${p.in}:${p.name}`;
+          return !opParamNames.has(key);
+        }),
+      ];
+
+      const seenParamNames = new Set<string>();
+      const parameters: Parameter[] = mergedRawParams
+        .map((p) => {
+          if ((p as unknown as { $ref: string }).$ref) {
+            const refPath = (p as unknown as { $ref: string }).$ref.replace("#/", "").split("/");
+            let resolved: unknown = doc;
+            for (const seg of refPath) {
+              resolved = (resolved as Record<string, unknown>)[seg];
+            }
+            return resolved as OpenApiParameter;
+          }
+          return p;
+        })
         .filter((p) => p.in !== "cookie")
-        .map((p) => ({
-          name: p.name.replace(/[^a-zA-Z0-9_]/g, ""),
-          wireName: p.name,
-          location: p.in as "path" | "query" | "header",
-          type: parseTypeRef(doc, p.schema),
-          required: p.required ?? false,
-          description: p.description,
-        }));
+        .map((p) => {
+          let name = p.name.replace(/[^a-zA-Z0-9_]/g, "");
+          if (seenParamNames.has(name)) {
+            let suffix = 2;
+            while (seenParamNames.has(`${name}${suffix}`)) suffix++;
+            name = `${name}${suffix}`;
+          }
+          seenParamNames.add(name);
+          return {
+            name,
+            wireName: p.name,
+            location: p.in as "path" | "query" | "header",
+            type: parseTypeRef(doc, p.schema),
+            required: p.required ?? false,
+            description: p.description,
+          };
+        });
 
       let requestBody: RequestBody | undefined;
       if (op.requestBody) {
-        const content = op.requestBody.content;
-        const jsonContent = content["application/json"];
-        if (jsonContent) {
+        let reqBody = op.requestBody;
+        if ((reqBody as unknown as { $ref: string }).$ref) {
+          const refPath = (reqBody as unknown as { $ref: string }).$ref.replace("#/", "").split("/");
+          let resolved: unknown = doc;
+          for (const seg of refPath) {
+            resolved = (resolved as Record<string, unknown>)[seg];
+          }
+          reqBody = resolved as typeof reqBody;
+        }
+        const content = reqBody.content;
+        const jsonContent = content?.["application/json"];
+        if (jsonContent?.schema) {
           requestBody = {
             contentType: "application/json",
             type: parseTypeRef(doc, jsonContent.schema),
@@ -327,7 +389,7 @@ function parseOperations(doc: OpenApiDocument): Operation[] {
         responses.push({
           statusCode: code,
           contentType: jsonContent ? "application/json" : undefined,
-          type: jsonContent ? parseTypeRef(doc, jsonContent.schema) : undefined,
+          type: jsonContent?.schema ? parseTypeRef(doc, jsonContent.schema) : undefined,
           description: res.description,
         });
       }
