@@ -1,26 +1,33 @@
 import type { BaseClient, RequestOptions } from "./client.js";
 
-export interface PageResponse<T> {
-  data: T[];
-  hasMore: boolean;
+export interface CursorPageConfig<T> {
+  dataField: string;
+  cursorField: string;
+  cursorQueryParam: string;
+  hasMoreField?: string;
+}
+
+export interface OffsetPageConfig<T> {
+  dataField: string;
+  limitParam: string;
+  offsetParam: string;
+  hasMoreField?: string;
+  defaultLimit?: number;
 }
 
 export class CursorPage<T> implements AsyncIterable<T> {
   private client: BaseClient;
   private options: RequestOptions;
-  private cursorParam: string;
-  private extractPage: (response: unknown) => PageResponse<T>;
+  private config: CursorPageConfig<T>;
 
   constructor(
     client: BaseClient,
     options: RequestOptions,
-    cursorParam: string,
-    extractPage: (response: unknown) => PageResponse<T>,
+    config: CursorPageConfig<T>,
   ) {
     this.client = client;
     this.options = options;
-    this.cursorParam = cursorParam;
-    this.extractPage = extractPage;
+    this.config = config;
   }
 
   async *[Symbol.asyncIterator](): AsyncIterator<T> {
@@ -28,23 +35,29 @@ export class CursorPage<T> implements AsyncIterable<T> {
 
     while (true) {
       const query = { ...this.options.query };
-      if (cursor) query[this.cursorParam] = cursor;
+      if (cursor) query[this.config.cursorQueryParam] = cursor;
 
-      const response = await this.client.request<unknown>({
+      const response = await this.client.request<Record<string, unknown>>({
         ...this.options,
         query,
       });
 
-      const page = this.extractPage(response);
-      for (const item of page.data) {
+      const items = (response[this.config.dataField] ?? []) as T[];
+      for (const item of items) {
         yield item;
       }
 
-      if (!page.hasMore || page.data.length === 0) break;
+      if (items.length === 0) break;
 
-      const lastItem = page.data[page.data.length - 1] as Record<string, unknown>;
-      cursor = lastItem?.["id"] as string | undefined;
-      if (!cursor) break;
+      const nextCursor = response[this.config.cursorField] as string | undefined | null;
+      if (!nextCursor) break;
+
+      if (this.config.hasMoreField) {
+        const hasMore = response[this.config.hasMoreField] as boolean;
+        if (!hasMore) break;
+      }
+
+      cursor = nextCursor;
     }
   }
 }
@@ -52,45 +65,47 @@ export class CursorPage<T> implements AsyncIterable<T> {
 export class OffsetPage<T> implements AsyncIterable<T> {
   private client: BaseClient;
   private options: RequestOptions;
-  private limitParam: string;
-  private offsetParam: string;
-  private extractPage: (response: unknown) => PageResponse<T>;
+  private config: OffsetPageConfig<T>;
 
   constructor(
     client: BaseClient,
     options: RequestOptions,
-    limitParam: string,
-    offsetParam: string,
-    extractPage: (response: unknown) => PageResponse<T>,
+    config: OffsetPageConfig<T>,
   ) {
     this.client = client;
     this.options = options;
-    this.limitParam = limitParam;
-    this.offsetParam = offsetParam;
-    this.extractPage = extractPage;
+    this.config = config;
   }
 
   async *[Symbol.asyncIterator](): AsyncIterator<T> {
-    let offset = 0;
-    const limit = (this.options.query?.[this.limitParam] as number) ?? 20;
+    let offset = (this.options.query?.[this.config.offsetParam] as number) ?? 0;
+    const limit = (this.options.query?.[this.config.limitParam] as number) ?? this.config.defaultLimit ?? 20;
 
     while (true) {
       const query = { ...this.options.query };
-      query[this.limitParam] = limit;
-      query[this.offsetParam] = offset;
+      query[this.config.limitParam] = limit;
+      query[this.config.offsetParam] = offset;
 
-      const response = await this.client.request<unknown>({
+      const response = await this.client.request<Record<string, unknown>>({
         ...this.options,
         query,
       });
 
-      const page = this.extractPage(response);
-      for (const item of page.data) {
+      const items = (response[this.config.dataField] ?? []) as T[];
+      for (const item of items) {
         yield item;
       }
 
-      if (!page.hasMore || page.data.length === 0) break;
-      offset += page.data.length;
+      if (items.length === 0) break;
+
+      if (this.config.hasMoreField) {
+        const hasMore = response[this.config.hasMoreField] as boolean;
+        if (!hasMore) break;
+      } else if (items.length < limit) {
+        break;
+      }
+
+      offset += items.length;
     }
   }
 }

@@ -263,27 +263,34 @@ function inferPagination(
     (p) => p.name === "limit" || p.name === "per_page" || p.name === "page_size",
   );
   const hasCursor = params.some(
-    (p) => p.name === "cursor" || p.name === "after" || p.name === "starting_after",
+    (p) => p.name === "cursor" || p.name === "after" || p.name === "starting_after" || p.name === "page_token",
   );
   const hasOffset = params.some(
     (p) => p.name === "offset" || p.name === "page" || p.name === "skip",
   );
 
-  if (!hasLimit) return undefined;
+  if (!hasLimit && !hasCursor && !hasOffset) return undefined;
 
   const limitParam =
     params.find((p) => ["limit", "per_page", "page_size"].includes(p.name))
       ?.name ?? "limit";
 
+  const successResponse = responses.find(
+    (r) => r.statusCode >= 200 && r.statusCode < 300 && r.type,
+  );
+  const dataField = detectDataField(successResponse?.type);
+
   if (hasCursor) {
     const cursorParam =
-      params.find((p) => ["cursor", "after", "starting_after"].includes(p.name))
+      params.find((p) => ["cursor", "after", "starting_after", "page_token"].includes(p.name))
         ?.name ?? "cursor";
+    const cursorResponseField = detectCursorField(successResponse?.type);
     return {
       style: "cursor",
       limitParam,
       cursorParam,
-      cursorResponsePath: "next_cursor",
+      cursorResponsePath: cursorResponseField ?? "next_cursor",
+      dataField,
     };
   }
 
@@ -291,10 +298,29 @@ function inferPagination(
     const offsetParam =
       params.find((p) => ["offset", "page", "skip"].includes(p.name))?.name ??
       "offset";
-    return { style: "offset", limitParam, offsetParam };
+    return { style: "offset", limitParam, offsetParam, dataField };
   }
 
   return undefined;
+}
+
+function detectDataField(type: TypeRef | undefined): string | undefined {
+  if (!type || type.kind !== "object") return undefined;
+  const obj = type as ObjectType;
+  const arrayFields = obj.properties.filter((p) => p.type.kind === "array");
+  const knownNames = ["data", "items", "results", "records", "entries", "list"];
+  const match = arrayFields.find((p) => knownNames.includes(p.name));
+  if (match) return match.name;
+  if (arrayFields.length === 1) return arrayFields[0].name;
+  return undefined;
+}
+
+function detectCursorField(type: TypeRef | undefined): string | undefined {
+  if (!type || type.kind !== "object") return undefined;
+  const obj = type as ObjectType;
+  const knownCursorFields = ["next_cursor", "next_page_token", "cursor", "after", "next"];
+  const match = obj.properties.find((p) => knownCursorFields.includes(p.name));
+  return match?.name;
 }
 
 function slugify(name: string): string {

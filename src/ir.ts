@@ -110,6 +110,7 @@ interface PaginationConfig {
   offsetParam?: string;
   cursorParam?: string;
   cursorResponsePath?: string;
+  dataField?: string;
 }
 
 interface ServiceGroup {

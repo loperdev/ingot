@@ -3,6 +3,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
   ApiSpec,
+  ArrayType,
   AuthScheme,
   EnumType,
   ObjectType,
@@ -200,36 +201,83 @@ function returnType(op: Operation): string {
   return typeRefToTs(successResponse.type);
 }
 
+function paginatedItemType(op: Operation): string | null {
+  if (!op.pagination?.dataField) return null;
+  const successResponse = op.responses.find(
+    (r) => r.statusCode >= 200 && r.statusCode < 300 && r.type,
+  );
+  if (!successResponse?.type || successResponse.type.kind !== "object") return null;
+  const obj = successResponse.type as ObjectType;
+  const field = obj.properties.find((p) => p.name === op.pagination!.dataField);
+  if (!field || field.type.kind !== "array") return null;
+  return typeRefToTs((field.type as ArrayType).items);
+}
+
 function generateMethodName(op: Operation): string {
   return op.id.replace(/[^a-zA-Z0-9]/g, " ").replace(/\s+(.)/g, (_, c) => c.toUpperCase()).replace(/\s/g, "");
 }
 
-function generateServiceGroup(group: ServiceGroup): string {
+function generateServiceGroup(group: ServiceGroup): { code: string; needsPagination: boolean } {
+  let needsPagination = false;
+
   const methods = group.operations.map((op) => {
     const name = generateMethodName(op);
     const { signature, bodyAccess } = buildMethodParams(op);
-    const ret = returnType(op);
     const url = buildUrl(op);
     const query = buildQueryString(op);
     const method = op.method.toUpperCase();
+    const itemType = paginatedItemType(op);
 
     const lines: string[] = [];
     if (op.description) {
       lines.push(formatJsDoc(op.description, "  "));
     }
-    lines.push(`  async ${name}(${signature}): Promise<${ret}> {`);
-    lines.push(`    return this.client.request({`);
-    lines.push(`      method: "${method}",`);
-    lines.push(`      path: ${url},`);
-    if (query) {
-      lines.push(`      query: ${query},`);
+
+    if (itemType && op.pagination) {
+      needsPagination = true;
+      const pageClass = op.pagination.style === "cursor" ? "CursorPage" : "OffsetPage";
+      lines.push(`  ${name}(${signature}): ${pageClass}<${itemType}> {`);
+
+      if (op.pagination.style === "cursor") {
+        lines.push(`    return new CursorPage(this.client, {`);
+        lines.push(`      method: "${method}",`);
+        lines.push(`      path: ${url},`);
+        if (query) lines.push(`      query: ${query},`);
+        lines.push(`      requestConfig,`);
+        lines.push(`    }, {`);
+        lines.push(`      dataField: "${op.pagination.dataField}",`);
+        lines.push(`      cursorField: "${op.pagination.cursorResponsePath ?? "next_cursor"}",`);
+        lines.push(`      cursorQueryParam: "${op.pagination.cursorParam ?? "cursor"}",`);
+        lines.push(`    });`);
+      } else {
+        lines.push(`    return new OffsetPage(this.client, {`);
+        lines.push(`      method: "${method}",`);
+        lines.push(`      path: ${url},`);
+        if (query) lines.push(`      query: ${query},`);
+        lines.push(`      requestConfig,`);
+        lines.push(`    }, {`);
+        lines.push(`      dataField: "${op.pagination.dataField}",`);
+        lines.push(`      limitParam: "${op.pagination.limitParam}",`);
+        lines.push(`      offsetParam: "${op.pagination.offsetParam ?? "offset"}",`);
+        lines.push(`    });`);
+      }
+      lines.push(`  }`);
+    } else {
+      const ret = returnType(op);
+      lines.push(`  async ${name}(${signature}): Promise<${ret}> {`);
+      lines.push(`    return this.client.request({`);
+      lines.push(`      method: "${method}",`);
+      lines.push(`      path: ${url},`);
+      if (query) {
+        lines.push(`      query: ${query},`);
+      }
+      if (bodyAccess) {
+        lines.push(`      body: ${bodyAccess},`);
+      }
+      lines.push(`      requestConfig,`);
+      lines.push(`    });`);
+      lines.push(`  }`);
     }
-    if (bodyAccess) {
-      lines.push(`      body: ${bodyAccess},`);
-    }
-    lines.push(`      requestConfig,`);
-    lines.push(`    });`);
-    lines.push(`  }`);
     return lines.join("\n");
   });
 
@@ -242,7 +290,7 @@ function generateServiceGroup(group: ServiceGroup): string {
     "}",
   ];
 
-  return lines.join("\n");
+  return { code: lines.join("\n"), needsPagination };
 }
 
 function generateClientClass(spec: ApiSpec): string {
@@ -380,6 +428,7 @@ function generateEntrypoint(spec: ApiSpec): string {
     `} from "./_runtime/error.js";`,
     `export type { RequestConfig } from "./_runtime/client.js";`,
     `export { Stream } from "./_runtime/streaming.js";`,
+    `export { CursorPage, OffsetPage } from "./_runtime/pagination.js";`,
   ];
 
   const modelNames: string[] = [];
@@ -452,8 +501,13 @@ async function generateTypescriptSdk(
       );
     }
     parts.push(`import type { IngotClient } from "../client.js";`);
-    parts.push(`import type { RequestConfig } from "../_runtime/client.js";\n`);
-    parts.push(generateServiceGroup(group));
+    parts.push(`import type { RequestConfig } from "../_runtime/client.js";`);
+    const { code, needsPagination } = generateServiceGroup(group);
+    if (needsPagination) {
+      parts.push(`import { CursorPage, OffsetPage } from "../_runtime/pagination.js";`);
+    }
+    parts.push("");
+    parts.push(code);
     parts.push("");
 
     await writeFile(join(resourcesDir, `${group.name}.ts`), parts.join("\n"));
