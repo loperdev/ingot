@@ -127,7 +127,12 @@ function generateModels(spec: ApiSpec): string {
   return parts.join("\n");
 }
 
-function buildMethodParams(op: Operation): string {
+interface MethodParamShape {
+  signature: string;
+  bodyAccess: string | null;
+}
+
+function buildMethodParams(op: Operation): MethodParamShape {
   const params: string[] = [];
 
   for (const param of op.parameters.filter((p) => p.location === "path")) {
@@ -136,8 +141,14 @@ function buildMethodParams(op: Operation): string {
 
   const queryParams = op.parameters.filter((p) => p.location === "query");
   const hasBody = !!op.requestBody;
+  let bodyAccess: string | null = null;
 
-  if (hasBody || queryParams.length > 0) {
+  if (hasBody && queryParams.length === 0) {
+    const bodyType = typeRefToTs(op.requestBody!.type);
+    const opt = op.requestBody!.required ? "" : "?";
+    params.push(`body${opt}: ${bodyType}`);
+    bodyAccess = "body";
+  } else if (hasBody || queryParams.length > 0) {
     const optionsFields: string[] = [];
 
     for (const q of queryParams) {
@@ -149,6 +160,7 @@ function buildMethodParams(op: Operation): string {
       const bodyType = typeRefToTs(op.requestBody!.type);
       const opt = op.requestBody!.required ? "" : "?";
       optionsFields.push(`body${opt}: ${bodyType}`);
+      bodyAccess = "options.body";
     }
 
     if (optionsFields.length > 0) {
@@ -156,7 +168,8 @@ function buildMethodParams(op: Operation): string {
     }
   }
 
-  return params.join(", ");
+  params.push("requestConfig?: RequestConfig");
+  return { signature: params.join(", "), bodyAccess };
 }
 
 function buildUrl(op: Operation): string {
@@ -194,7 +207,7 @@ function generateMethodName(op: Operation): string {
 function generateServiceGroup(group: ServiceGroup): string {
   const methods = group.operations.map((op) => {
     const name = generateMethodName(op);
-    const params = buildMethodParams(op);
+    const { signature, bodyAccess } = buildMethodParams(op);
     const ret = returnType(op);
     const url = buildUrl(op);
     const query = buildQueryString(op);
@@ -204,16 +217,17 @@ function generateServiceGroup(group: ServiceGroup): string {
     if (op.description) {
       lines.push(formatJsDoc(op.description, "  "));
     }
-    lines.push(`  async ${name}(${params}): Promise<${ret}> {`);
+    lines.push(`  async ${name}(${signature}): Promise<${ret}> {`);
     lines.push(`    return this.client.request({`);
     lines.push(`      method: "${method}",`);
     lines.push(`      path: ${url},`);
     if (query) {
       lines.push(`      query: ${query},`);
     }
-    if (op.requestBody) {
-      lines.push(`      body: options.body,`);
+    if (bodyAccess) {
+      lines.push(`      body: ${bodyAccess},`);
     }
+    lines.push(`      requestConfig,`);
     lines.push(`    });`);
     lines.push(`  }`);
     return lines.join("\n");
@@ -364,6 +378,8 @@ function generateEntrypoint(spec: ApiSpec): string {
     `  InternalServerError,`,
     `  TimeoutError,`,
     `} from "./_runtime/error.js";`,
+    `export type { RequestConfig } from "./_runtime/client.js";`,
+    `export { Stream } from "./_runtime/streaming.js";`,
   ];
 
   const modelNames: string[] = [];
@@ -392,7 +408,7 @@ const RUNTIME_DIR = join(
 async function copyRuntime(srcDir: string): Promise<void> {
   const runtimeDir = join(srcDir, "_runtime");
   await mkdir(runtimeDir, { recursive: true });
-  for (const file of ["client.ts", "error.ts", "pagination.ts"]) {
+  for (const file of ["client.ts", "error.ts", "pagination.ts", "streaming.ts"]) {
     await copyFile(join(RUNTIME_DIR, file), join(runtimeDir, file));
   }
 }
@@ -435,7 +451,8 @@ async function generateTypescriptSdk(
         `import type { ${[...imports].join(", ")} } from "../models.js";`,
       );
     }
-    parts.push(`import type { IngotClient } from "../client.js";\n`);
+    parts.push(`import type { IngotClient } from "../client.js";`);
+    parts.push(`import type { RequestConfig } from "../_runtime/client.js";\n`);
     parts.push(generateServiceGroup(group));
     parts.push("");
 
